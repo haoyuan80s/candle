@@ -1,6 +1,6 @@
 /// Methods for backpropagation of gradients.
 use crate::op::{BinaryOp, Op, ReduceOp, UnaryOp};
-use crate::{Error, Result, Tensor, TensorId};
+use crate::{Error, IndexOp, Result, Tensor, TensorId};
 use std::collections::HashMap;
 
 // arg has been reduced to node via reduce_dims, expand it back to arg.
@@ -343,34 +343,123 @@ impl Tensor {
                         kernel_size,
                         stride,
                     } => {
-                        if kernel_size != stride {
-                            crate::bail!("backward not supported for avgpool2d if ksize {kernel_size:?} != stride {stride:?}")
-                        }
+                        // if kernel_size != stride {
+                        //     crate::bail!("backward not supported for avgpool2d if ksize {kernel_size:?} != stride {stride:?}")
+                        // }
+                        // let (_n, _c, h, w) = arg.dims4()?;
+                        // let grad_arg = grad.upsample_nearest2d(h, w)?;
+                        // let grad_arg =
+                        //     (grad_arg * (1f64 / (kernel_size.0 * kernel_size.1) as f64))?;
+                        // let sum_grad = grads.or_insert(arg)?;
+                        // *sum_grad = sum_grad.add(&grad_arg)?;
+
                         let (_n, _c, h, w) = arg.dims4()?;
-                        let grad_arg = grad.upsample_nearest2d(h, w)?;
-                        let grad_arg =
-                            (grad_arg * (1f64 / (kernel_size.0 * kernel_size.1) as f64))?;
+                        let (out_h, out_w) = (grad.shape().dims()[2], grad.shape().dims()[3]);
+                        // let mut grad_arg = Tensor::zeros_like(arg)?;
+                        let mut grad_arg = vec![0.0; _n * _c * h * w];
+
+                        let kernel_area = (kernel_size.0 * kernel_size.1) as f64;
+                        let scale_factor = 1.0 / kernel_area;
+
+                        // Loop through each position in the output gradient
+                        for oh in 0..out_h {
+                            for ow in 0..out_w {
+                                // Calculate the starting position in the input corresponding to this output
+                                let start_h = oh * stride.0;
+                                let start_w = ow * stride.1;
+
+                                // Accumulate gradient across the kernel-sized region
+                                for kh in 0..kernel_size.0 {
+                                    for kw in 0..kernel_size.1 {
+                                        let ih = start_h + kh;
+                                        let iw = start_w + kw;
+
+                                        if ih < h && iw < w {
+                                            grad_arg[(0 * h * w + 0 * w + ih * w + iw) as usize] +=
+                                                grad.i((0, 0, oh, ow)).unwrap().to_vec0().unwrap()
+                                                    * scale_factor;
+
+                                            // grad_arg.slice_set(&[0, 0, oh, ow], to_insert);
+
+                                            // dbg!(grad.i(&vec![0, 0, oh, ow]).unwrap());
+                                            // dbg!(grad[0]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Add the accumulated gradients to the existing gradients
                         let sum_grad = grads.or_insert(arg)?;
-                        *sum_grad = sum_grad.add(&grad_arg)?;
+                        let grad_arg = Tensor::from_vec(grad_arg, arg.dims(), arg.device())?;
+                        *sum_grad = sum_grad.add(&grad_arg)
                     }
                     Op::MaxPool2D {
                         arg,
                         kernel_size,
                         stride,
                     } => {
-                        if kernel_size != stride {
-                            crate::bail!("backward not supported for maxpool2d if ksize {kernel_size:?} != stride {stride:?}")
-                        }
+                        // if kernel_size != stride {
+                        //     crate::bail!("backward not supported for maxpool2d if ksize {kernel_size:?} != stride {stride:?}")
+                        // }
+                        // let (_n, _c, h, w) = arg.dims4()?;
+                        // // For computing the max-pool gradient, we compute a mask where a 1 means
+                        // // that the element is the maximum, then we apply this mask to the
+                        // // upsampled gradient (taking into account that multiple max may exist so
+                        // // we scale the gradient for this case).
+                        // let node_upsampled = node.upsample_nearest2d(h, w)?;
+                        // let mask = arg.eq(&node_upsampled)?.to_dtype(arg.dtype())?;
+                        // let avg = mask.avg_pool2d_with_stride(*kernel_size, *stride)?;
+                        // let grad_arg = ((grad * avg)?.upsample_nearest2d(h, w)? * mask)?;
+                        // let sum_grad = grads.or_insert(arg)?;
+                        // *sum_grad = sum_grad.add(&grad_arg)?;
+
                         let (_n, _c, h, w) = arg.dims4()?;
-                        // For computing the max-pool gradient, we compute a mask where a 1 means
-                        // that the element is the maximum, then we apply this mask to the
-                        // upsampled gradient (taking into account that multiple max may exist so
-                        // we scale the gradient for this case).
-                        let node_upsampled = node.upsample_nearest2d(h, w)?;
-                        let mask = arg.eq(&node_upsampled)?.to_dtype(arg.dtype())?;
-                        let avg = mask.avg_pool2d_with_stride(*kernel_size, *stride)?;
-                        let grad_arg = ((grad * avg)?.upsample_nearest2d(h, w)? * mask)?;
+                        let (out_h, out_w) = (grad.shape().dims()[2], grad.shape().dims()[3]);
+                        let mut grad_arg = vec![0.0; _n * _c * h * w];
+
+                        // Iterate over the output gradient positions
+                        for oh in 0..out_h {
+                            for ow in 0..out_w {
+                                // Compute the starting position in the input for this kernel
+                                let start_h = oh * stride.0;
+                                let start_w = ow * stride.1;
+
+                                // Determine the region in the input corresponding to this kernel
+                                let mut max_val = f64::MIN;
+                                let mut max_positions = vec![];
+
+                                // Find the maximum value and its positions in the kernel region
+                                for kh in 0..kernel_size.0 {
+                                    for kw in 0..kernel_size.1 {
+                                        let ih = start_h + kh;
+                                        let iw = start_w + kw;
+
+                                        if ih < h && iw < w {
+                                            let current_val = arg.i((0, 0, ih, iw))?.to_vec0()?;
+                                            if current_val > max_val {
+                                                max_val = current_val;
+                                                max_positions = vec![(ih, iw)];
+                                            } else if current_val == max_val {
+                                                max_positions.push((ih, iw));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Distribute the gradient to all max positions in the kernel region
+                                let grad_value =
+                                    (grad.i((0, 0, oh, ow))? / (max_positions.len() as f64))?;
+                                for &(ih, iw) in &max_positions {
+                                    grad_arg[(0 * h * w + 0 * w + ih * w + iw) as usize] +=
+                                        grad_value.to_vec0().unwrap();
+                                }
+                            }
+                        }
+
+                        // Add the accumulated gradients to the existing gradients
                         let sum_grad = grads.or_insert(arg)?;
+                        let grad_arg = Tensor::from_vec(grad_arg, arg.dims(), arg.device())?;
                         *sum_grad = sum_grad.add(&grad_arg)?;
                     }
                     Op::UpsampleNearest1D { arg, target_size } => {
